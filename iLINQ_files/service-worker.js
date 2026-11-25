@@ -1,0 +1,130 @@
+"use strict";
+
+const CACHE_NAME = "static-cache-v1";
+
+// Add site version to ensure the cache is invalidated when we update the site
+const OFFLINE_CACHE_PAGE = "/manifest/offline?v=26.1.17";
+
+const CACHE_FILES = [
+    OFFLINE_CACHE_PAGE, // The offline page
+    "https://schoolbox-static.cloud/26.1.17-1/images/core/fail-whale.png?v=26.1.17", // Main fail whale image
+    "https://schoolbox-static.cloud/26.1.17-1/images/core/icons/fail-whale-16x16.png?v=26.1.17", // Fail whale icon
+];
+
+self.addEventListener("install", (evt) => {
+    // CODELAB: Precache static resources here.
+    evt.waitUntil(
+        caches.open(CACHE_NAME).then((cache) => {
+            return cache.addAll(CACHE_FILES);
+        }),
+    );
+    self.skipWaiting();
+});
+
+self.addEventListener("activate", (evt) => {
+    // CODELAB: Remove previous cached data from disk.
+    evt.waitUntil(
+        caches.keys().then((keyList) => {
+            return Promise.all(
+                keyList.map((key) => {
+                    if (key !== CACHE_NAME) {
+                        return caches.delete(key);
+                    }
+                }),
+            );
+        }),
+    );
+
+    self.clients.claim();
+});
+
+self.addEventListener("fetch", (evt) => {
+    // If the request matches an item in CACHE_FILES, return it
+    // This allows access to things like images when offline despite the evt.request.mode not being "navigate"
+    const matchedCacheFileName = CACHE_FILES.find((file) => {
+        if (evt.request.url.includes(file)) return true;
+
+        // If the request URL doesn't exactly match the cache file, but the cache is relative (beings with /),
+        // then remove the origin and see if it matches
+        if (file.startsWith("/")) {
+            return evt.request.url.includes(self.location.origin + file);
+        }
+
+        // otherwise, don't match
+        return false;
+    });
+
+    if (matchedCacheFileName) {
+        evt.respondWith(
+            caches.open(CACHE_NAME).then((cache) => {
+                return cache.match(matchedCacheFileName);
+            }),
+        );
+        return;
+    }
+
+    // If this request is not to our site, don't try to handle it
+    if (!evt.request.url.startsWith(self.location.origin)) {
+        return;
+    }
+
+    // The offline page should only be returned if:
+    // - The request is a page navigation (evt.request.mode === "navigate")
+    // - AND the request is not a redirect (evt.request.redirect !== "follow")
+    // https://fetch.spec.whatwg.org/#concept-request-mode is a good reference for what these actually mean
+    //
+    // The redirect check is to avoid triggering the offline page if we make a request to a page that fails to load (e.g. see SA-16458)
+    if (evt.request.mode !== "navigate" && evt.request.redirect !== "follow") {
+        // Not a page navigation, bail.
+        return;
+    }
+
+    // clicking the back button to navigate back to a POST request
+    // the service worker cannot handle this. Bypass such requests.
+    if (evt.request.cache === "only-if-cached" || evt.request.method !== "GET") {
+        return;
+    }
+
+    evt.respondWith(
+        fetch(evt.request).catch((error) => {
+                        return caches.open(CACHE_NAME).then((cache) => {
+                return cache.match(OFFLINE_CACHE_PAGE);
+            });
+        }),
+    );
+});
+
+// Listen for messages from the main script
+self.addEventListener("message", (event) => {
+    // iOS requires notifications to be dispatched from inside a service worker
+    // This provides a way for a script to show a notification after the user has granted permissions
+    if (event.data.type === "SHOW_NOTIFICATION") {
+        const { title, options } = event.data;
+        self.registration.showNotification(title, options);
+    }
+});
+
+// example from: https://developer.mozilla.org/en-US/docs/Web/API/Clients/openWindow
+// Notification click event listener
+// Also in service-worker.js.twig (firebase) to handle notifications created from firebase
+self.addEventListener("notificationclick", (e) => {
+    // Close the notification popout
+    e.notification.close();
+    // Get all the Window clients
+    e.waitUntil(
+        clients.matchAll({ type: "window" }).then((clientsArr) => {
+            let href = "/";
+            // if no href or undefined then cast to user's dashboard
+            if (e.notification.data.href !== "" && e.notification.data.href !== undefined) {
+                href = e.notification.data.href;
+            }
+            // If a Window tab matching the targeted URL already exists, focus that;
+            const hadWindowToFocus = clientsArr.some((windowClient) =>
+                windowClient.url === href ? (windowClient.focus(), true) : false,
+            );
+            // Otherwise, open a new tab to the applicable URL and focus it.
+            if (!hadWindowToFocus)
+                clients.openWindow(href).then((windowClient) => (windowClient ? windowClient.focus() : null));
+        }),
+    );
+});
